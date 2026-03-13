@@ -2,6 +2,7 @@ package fact
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -9,10 +10,11 @@ import (
 // MemoryStore is an in-memory EventStore with synchronous projection
 // and async publishing. Safe for concurrent use.
 type MemoryStore struct {
-	mu         sync.Mutex
-	streams    map[string][]Event
-	projectors []Projector
-	publishers []Publisher
+	mu              sync.Mutex
+	streams         map[string][]Event
+	projectors      []Projector
+	publishers      []Publisher
+	onPublishError  func(error)
 }
 
 // Option configures a MemoryStore.
@@ -29,6 +31,15 @@ func WithProjector(p Projector) Option {
 func WithPublisher(p Publisher) Option {
 	return func(s *MemoryStore) {
 		s.publishers = append(s.publishers, p)
+	}
+}
+
+// WithPublishErrorHandler registers a callback invoked when a publisher
+// returns an error. The callback runs in the publisher goroutine.
+// This is in addition to the default slog.Error logging.
+func WithPublishErrorHandler(fn func(error)) Option {
+	return func(s *MemoryStore) {
+		s.onPublishError = fn
 	}
 }
 
@@ -83,7 +94,12 @@ func (s *MemoryStore) Append(ctx context.Context, stream string, events []Event)
 	if len(s.publishers) > 0 {
 		go func() {
 			for _, pub := range s.publishers {
-				pub.Publish(ctx, prepared)
+				if err := pub.Publish(ctx, prepared); err != nil {
+					slog.Error("publisher failed", "stream", stream, "error", err)
+					if s.onPublishError != nil {
+						s.onPublishError(err)
+					}
+				}
 			}
 		}()
 	}

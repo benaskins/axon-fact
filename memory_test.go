@@ -335,6 +335,98 @@ func TestMemoryStore_ConcurrentAppend(t *testing.T) {
 	}
 }
 
+func TestMemoryStore_PublisherErrorLogged(t *testing.T) {
+	done := make(chan struct{})
+	publisher := &funcPublisher{fn: func(ctx context.Context, events []Event) error {
+		defer close(done)
+		return fmt.Errorf("publish failed: connection refused")
+	}}
+
+	store := NewMemoryStore(WithPublisher(publisher))
+	ctx := context.Background()
+
+	err := store.Append(ctx, "s", []Event{{ID: "1", Type: "a", Data: json.RawMessage(`{}`)}})
+	if err != nil {
+		t.Fatalf("Append should succeed even when publisher fails: %v", err)
+	}
+
+	// Wait for async publish to complete
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("publisher not called within 2s")
+	}
+
+	// Events should still be stored
+	events, _ := store.Load(ctx, "s")
+	if len(events) != 1 {
+		t.Errorf("got %d events, want 1", len(events))
+	}
+}
+
+func TestMemoryStore_PublishErrorHandler(t *testing.T) {
+	publishErr := fmt.Errorf("nats: connection closed")
+	handlerCalled := make(chan error, 1)
+
+	publisher := &funcPublisher{fn: func(ctx context.Context, events []Event) error {
+		return publishErr
+	}}
+
+	store := NewMemoryStore(
+		WithPublisher(publisher),
+		WithPublishErrorHandler(func(err error) {
+			handlerCalled <- err
+		}),
+	)
+	ctx := context.Background()
+
+	store.Append(ctx, "s", []Event{{ID: "1", Type: "a", Data: json.RawMessage(`{}`)}})
+
+	select {
+	case got := <-handlerCalled:
+		if got != publishErr {
+			t.Errorf("handler got %v, want %v", got, publishErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("error handler not called within 2s")
+	}
+}
+
+func TestMemoryStore_PublishErrorHandlerNotCalledOnSuccess(t *testing.T) {
+	done := make(chan struct{})
+	handlerCalled := make(chan struct{}, 1)
+
+	publisher := &funcPublisher{fn: func(ctx context.Context, events []Event) error {
+		defer close(done)
+		return nil
+	}}
+
+	store := NewMemoryStore(
+		WithPublisher(publisher),
+		WithPublishErrorHandler(func(err error) {
+			handlerCalled <- struct{}{}
+		}),
+	)
+	ctx := context.Background()
+
+	store.Append(ctx, "s", []Event{{ID: "1", Type: "a", Data: json.RawMessage(`{}`)}})
+
+	// Wait for publish to complete
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("publisher not called within 2s")
+	}
+
+	// Give a brief window for handler to be called (it shouldn't be)
+	select {
+	case <-handlerCalled:
+		t.Fatal("error handler should not be called on success")
+	case <-time.After(50 * time.Millisecond):
+		// Expected: handler was not called
+	}
+}
+
 // Test helpers
 
 type funcProjector struct {
