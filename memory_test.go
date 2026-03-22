@@ -427,6 +427,88 @@ func TestMemoryStore_PublishErrorHandlerNotCalledOnSuccess(t *testing.T) {
 	}
 }
 
+func TestMemoryStore_NestedAppend(t *testing.T) {
+	ctx := context.Background()
+
+	// A projector that appends to a different stream when it sees "trigger" events
+	var store *MemoryStore
+	reactor := &funcProjector{fn: func(ctx context.Context, e Event) error {
+		if e.Type == "trigger" {
+			return store.Append(ctx, "derived", []Event{
+				{ID: e.ID + "-derived", Type: "derived.event", Data: json.RawMessage(`{}`)},
+			})
+		}
+		return nil
+	}}
+
+	store = NewMemoryStore(WithProjector(reactor))
+
+	err := store.Append(ctx, "source", []Event{
+		{ID: "e1", Type: "trigger", Data: json.RawMessage(`{}`)},
+	})
+	if err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	source, _ := store.Load(ctx, "source")
+	derived, _ := store.Load(ctx, "derived")
+
+	if len(source) != 1 {
+		t.Errorf("source: got %d events, want 1", len(source))
+	}
+	if len(derived) != 1 {
+		t.Errorf("derived: got %d events, want 1", len(derived))
+	}
+	if derived[0].ID != "e1-derived" {
+		t.Errorf("derived event ID = %q, want %q", derived[0].ID, "e1-derived")
+	}
+	if derived[0].Stream != "derived" {
+		t.Errorf("derived event Stream = %q, want %q", derived[0].Stream, "derived")
+	}
+	if derived[0].Sequence != 1 {
+		t.Errorf("derived event Sequence = %d, want 1", derived[0].Sequence)
+	}
+}
+
+func TestMemoryStore_NestedAppendMultiple(t *testing.T) {
+	ctx := context.Background()
+
+	// Reactor produces two derived events per trigger
+	var store *MemoryStore
+	reactor := &funcProjector{fn: func(ctx context.Context, e Event) error {
+		if e.Type == "trigger" {
+			return store.Append(ctx, "derived", []Event{
+				{ID: e.ID + "-a", Type: "derived.a", Data: json.RawMessage(`{}`)},
+				{ID: e.ID + "-b", Type: "derived.b", Data: json.RawMessage(`{}`)},
+			})
+		}
+		return nil
+	}}
+
+	store = NewMemoryStore(WithProjector(reactor))
+
+	// Two triggers in one append
+	err := store.Append(ctx, "source", []Event{
+		{ID: "e1", Type: "trigger", Data: json.RawMessage(`{}`)},
+		{ID: "e2", Type: "trigger", Data: json.RawMessage(`{}`)},
+	})
+	if err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	derived, _ := store.Load(ctx, "derived")
+	if len(derived) != 4 {
+		t.Fatalf("derived: got %d events, want 4", len(derived))
+	}
+
+	// Sequences should be 1,2,3,4
+	for i, e := range derived {
+		if e.Sequence != int64(i+1) {
+			t.Errorf("derived[%d].Sequence = %d, want %d", i, e.Sequence, i+1)
+		}
+	}
+}
+
 // Test helpers
 
 type funcProjector struct {

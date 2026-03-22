@@ -7,6 +7,11 @@ import (
 	"time"
 )
 
+// memLockKey is a context key indicating the MemoryStore mutex is
+// already held by an outer Append call. This enables projectors to
+// call Append on other streams without deadlocking.
+type memLockKey struct{}
+
 // MemoryStore is an in-memory EventStore with synchronous projection
 // and async publishing. Safe for concurrent use.
 type MemoryStore struct {
@@ -56,12 +61,21 @@ func NewMemoryStore(opts ...Option) *MemoryStore {
 
 // Append stores events in a stream, assigns sequences and timestamps,
 // runs projectors synchronously, then publishes asynchronously.
+//
+// If called from within a projector (nested Append), the mutex is
+// already held and will not be re-acquired. Publishing only runs
+// from the outermost Append.
 func (s *MemoryStore) Append(ctx context.Context, stream string, events []Event) error {
 	if len(events) == 0 {
 		return nil
 	}
 
-	s.mu.Lock()
+	_, nested := ctx.Value(memLockKey{}).(bool)
+	if !nested {
+		s.mu.Lock()
+	}
+
+	ctx = context.WithValue(ctx, memLockKey{}, true)
 
 	existing := s.streams[stream]
 	nextSeq := int64(len(existing)) + 1
@@ -81,27 +95,32 @@ func (s *MemoryStore) Append(ctx context.Context, stream string, events []Event)
 	for _, p := range s.projectors {
 		for _, e := range prepared {
 			if err := p.Handle(ctx, e); err != nil {
-				s.mu.Unlock()
+				if !nested {
+					s.mu.Unlock()
+				}
 				return err
 			}
 		}
 	}
 
 	s.streams[stream] = append(existing, prepared...)
-	s.mu.Unlock()
 
-	// Publish asynchronously
-	if len(s.publishers) > 0 {
-		go func() {
-			for _, pub := range s.publishers {
-				if err := pub.Publish(ctx, prepared); err != nil {
-					slog.Error("publisher failed", "stream", stream, "error", err)
-					if s.onPublishError != nil {
-						s.onPublishError(err)
+	if !nested {
+		s.mu.Unlock()
+
+		// Publish asynchronously — only from the outermost Append
+		if len(s.publishers) > 0 {
+			go func() {
+				for _, pub := range s.publishers {
+					if err := pub.Publish(ctx, prepared); err != nil {
+						slog.Error("publisher failed", "stream", stream, "error", err)
+						if s.onPublishError != nil {
+							s.onPublishError(err)
+						}
 					}
 				}
-			}
-		}()
+			}()
+		}
 	}
 
 	return nil

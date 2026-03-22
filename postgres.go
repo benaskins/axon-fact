@@ -9,6 +9,12 @@ import (
 	"time"
 )
 
+// pgTxKey is a context key for propagating a database transaction
+// through nested Append calls. When a projector calls Append on
+// another stream, the inner Append joins the outer transaction
+// so both appends commit or roll back atomically.
+type pgTxKey struct{}
+
 // PostgresStore implements EventStore backed by PostgreSQL.
 // The caller is responsible for opening the database and running migrations
 // (using the exported Migrations embed.FS) before constructing the store.
@@ -55,20 +61,32 @@ func NewPostgresStore(db *sql.DB, opts ...PostgresOption) *PostgresStore {
 
 // Append persists events to a stream, assigns sequence numbers atomically,
 // runs projectors synchronously, then publishes asynchronously.
+//
+// If the context already carries a transaction (from an outer Append),
+// the inner Append joins it — both appends commit or roll back as one.
+// This enables projectors to append to other streams atomically.
 func (s *PostgresStore) Append(ctx context.Context, stream string, events []Event) error {
 	if len(events) == 0 {
 		return nil
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
+	// Check if we're inside a nested Append (projector calling back)
+	tx, nested := ctx.Value(pgTxKey{}).(*sql.Tx)
+	if !nested {
+		var err error
+		tx, err = s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("begin tx: %w", err)
+		}
+		defer tx.Rollback()
 	}
-	defer tx.Rollback()
+
+	// Propagate the transaction to projectors via context
+	ctx = context.WithValue(ctx, pgTxKey{}, tx)
 
 	// Get the next sequence number for this stream atomically
 	var maxSeq sql.NullInt64
-	err = tx.QueryRowContext(ctx, `
+	err := tx.QueryRowContext(ctx, `
 		SELECT MAX(sequence) FROM events WHERE stream = $1
 	`, stream).Scan(&maxSeq)
 	if err != nil {
@@ -123,22 +141,24 @@ func (s *PostgresStore) Append(ctx context.Context, stream string, events []Even
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit tx: %w", err)
-	}
+	// Only commit and publish from the outermost Append
+	if !nested {
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit tx: %w", err)
+		}
 
-	// Publish asynchronously
-	if len(s.publishers) > 0 {
-		go func() {
-			for _, pub := range s.publishers {
-				if err := pub.Publish(ctx, prepared); err != nil {
-					slog.Error("publisher failed", "stream", stream, "error", err)
-					if s.onPublishError != nil {
-						s.onPublishError(err)
+		if len(s.publishers) > 0 {
+			go func() {
+				for _, pub := range s.publishers {
+					if err := pub.Publish(ctx, prepared); err != nil {
+						slog.Error("publisher failed", "stream", stream, "error", err)
+						if s.onPublishError != nil {
+							s.onPublishError(err)
+						}
 					}
 				}
-			}
-		}()
+			}()
+		}
 	}
 
 	return nil

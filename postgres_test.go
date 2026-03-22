@@ -335,5 +335,94 @@ func TestPostgresStore_AppendEmpty(t *testing.T) {
 	}
 }
 
+func TestPostgresStore_NestedAppend(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	// A projector that appends to a different stream when it sees "trigger" events
+	var store *PostgresStore
+	reactor := &funcProjector{fn: func(ctx context.Context, e Event) error {
+		if e.Type == "trigger" {
+			return store.Append(ctx, "derived", []Event{
+				{ID: e.ID + "-derived", Type: "derived.event", Data: json.RawMessage(`{}`)},
+			})
+		}
+		return nil
+	}}
+
+	store = NewPostgresStore(db, WithPgProjector(reactor))
+
+	err := store.Append(ctx, "source", []Event{
+		{ID: "e1", Type: "trigger", Data: json.RawMessage(`{}`)},
+	})
+	if err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	source, _ := store.Load(ctx, "source")
+	derived, _ := store.Load(ctx, "derived")
+
+	if len(source) != 1 {
+		t.Errorf("source: got %d events, want 1", len(source))
+	}
+	if len(derived) != 1 {
+		t.Errorf("derived: got %d events, want 1", len(derived))
+	}
+	if derived[0].ID != "e1-derived" {
+		t.Errorf("derived event ID = %q, want %q", derived[0].ID, "e1-derived")
+	}
+	if derived[0].Stream != "derived" {
+		t.Errorf("derived event Stream = %q, want %q", derived[0].Stream, "derived")
+	}
+	if derived[0].Sequence != 1 {
+		t.Errorf("derived event Sequence = %d, want 1", derived[0].Sequence)
+	}
+}
+
+func TestPostgresStore_NestedAppendAtomicity(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	// Inner projector on derived events that always fails
+	failProjector := &funcProjector{fn: func(ctx context.Context, e Event) error {
+		if e.Type == "derived.event" {
+			return fmt.Errorf("derived projection failed")
+		}
+		return nil
+	}}
+
+	// Reactor that appends to "derived" stream on trigger events
+	var store *PostgresStore
+	reactor := &funcProjector{fn: func(ctx context.Context, e Event) error {
+		if e.Type == "trigger" {
+			return store.Append(ctx, "derived", []Event{
+				{ID: e.ID + "-derived", Type: "derived.event", Data: json.RawMessage(`{}`)},
+			})
+		}
+		return nil
+	}}
+
+	store = NewPostgresStore(db, WithPgProjector(reactor), WithPgProjector(failProjector))
+
+	err := store.Append(ctx, "source", []Event{
+		{ID: "e1", Type: "trigger", Data: json.RawMessage(`{}`)},
+	})
+	if err == nil {
+		t.Fatal("expected error from nested projector")
+	}
+
+	// Both streams should be empty — the whole transaction rolled back
+	store2 := NewPostgresStore(db)
+	source, _ := store2.Load(ctx, "source")
+	derived, _ := store2.Load(ctx, "derived")
+
+	if len(source) != 0 {
+		t.Errorf("source: got %d events, want 0 (tx rolled back)", len(source))
+	}
+	if len(derived) != 0 {
+		t.Errorf("derived: got %d events, want 0 (tx rolled back)", len(derived))
+	}
+}
+
 // Verify PostgresStore satisfies the EventStore interface at compile time.
 var _ EventStore = (*PostgresStore)(nil)
