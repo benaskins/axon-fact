@@ -1,3 +1,8 @@
+---
+module: github.com/benaskins/axon-fact
+kind: library
+---
+
 # axon-fact
 
 Event sourcing primitives — Event type, EventStore/Projector/Publisher interfaces.
