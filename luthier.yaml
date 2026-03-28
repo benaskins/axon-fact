@@ -1,0 +1,30 @@
+name: axon-fact
+purpose: Event sourcing primitives — Event, EventStore, Projector, Publisher
+use_when: Audit trail, replay, training corpus
+deterministic: true
+snippet:
+  imports:
+    - path: context
+    - path: fmt
+    - path: log/slog
+    - path: os
+    - path: github.com/benaskins/axon
+    - path: github.com/benaskins/axon-fact
+      alias: fact
+  requires:
+    - github.com/benaskins/axon
+    - github.com/benaskins/axon-fact
+  setup: |
+    dsn := os.Getenv("DATABASE_URL")
+    if dsn == "" {
+      fmt.Fprintln(os.Stderr, "DATABASE_URL must be set")
+      os.Exit(1)
+    }
+    db := axon.MustOpenDB(dsn, "app")
+    events := fact.NewPostgresStore(db,
+      // TODO: register domain projectors here
+    )
+    if err := events.Replay(context.Background()); err != nil {
+      slog.Error("replay events", "error", err)
+      os.Exit(1)
+    }
