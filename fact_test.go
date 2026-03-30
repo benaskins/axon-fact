@@ -40,6 +40,7 @@ func TestInterfaceCompilation(t *testing.T) {
 	var _ EventStore = (*testStore)(nil)
 	var _ Projector = (*testProjector)(nil)
 	var _ Publisher = (*testPublisher)(nil)
+	var _ Materializer = (*testMaterializer)(nil)
 }
 
 // Minimal implementations for compile check.
@@ -62,3 +63,8 @@ func (p *testProjector) Handle(ctx context.Context, event Event) error { return 
 type testPublisher struct{}
 
 func (p *testPublisher) Publish(ctx context.Context, events []Event) error { return nil }
+
+type testMaterializer struct{}
+
+func (m *testMaterializer) EnsureSchema(ctx context.Context, schemas ...Schema) error { return nil }
+func (m *testMaterializer) Materialize(ctx context.Context, facts ...Fact) error               { return nil }
