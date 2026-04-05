@@ -8,11 +8,12 @@ snippet:
     - path: fmt
     - path: log/slog
     - path: os
-    - path: github.com/benaskins/axon
+    - path: github.com/benaskins/axon-base/migration
+    - path: github.com/benaskins/axon-base/pool
     - path: github.com/benaskins/axon-fact
       alias: fact
   requires:
-    - github.com/benaskins/axon
+    - github.com/benaskins/axon-base
     - github.com/benaskins/axon-fact
   setup: |
     dsn := os.Getenv("DATABASE_URL")
@@ -20,7 +21,21 @@ snippet:
       fmt.Fprintln(os.Stderr, "DATABASE_URL must be set")
       os.Exit(1)
     }
-    db := axon.MustOpenDB(dsn, "app")
+    p, err := pool.NewPool(context.Background(), dsn, "app")
+    if err != nil {
+      slog.Error("open database", "error", err)
+      os.Exit(1)
+    }
+    defer p.Close()
+    db, err := p.StdDB()
+    if err != nil {
+      slog.Error("get sql.DB", "error", err)
+      os.Exit(1)
+    }
+    if err := migration.Run(db, fact.Migrations, "migrations"); err != nil {
+      slog.Error("run migrations", "error", err)
+      os.Exit(1)
+    }
     events := fact.NewPostgresStore(db,
       // TODO: register domain projectors here
     )
