@@ -1,4 +1,4 @@
-package fact
+package postgres
 
 import (
 	"context"
@@ -8,6 +8,7 @@ import (
 	"os"
 	"testing"
 
+	fact "github.com/benaskins/axon-fact"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -69,12 +70,18 @@ func openTestDB(t *testing.T) *sql.DB {
 	return db
 }
 
-func TestPostgresStore_Append(t *testing.T) {
+type funcProjector struct {
+	fn func(context.Context, fact.Event) error
+}
+
+func (p *funcProjector) Handle(ctx context.Context, e fact.Event) error { return p.fn(ctx, e) }
+
+func TestStore_Append(t *testing.T) {
 	db := openTestDB(t)
-	store := NewPostgresStore(db)
+	store := NewStore(db)
 	ctx := context.Background()
 
-	events := []Event{
+	events := []fact.Event{
 		{ID: "e1", Type: "item.added", Data: json.RawMessage(`{"price":25}`)},
 	}
 
@@ -104,15 +111,15 @@ func TestPostgresStore_Append(t *testing.T) {
 	}
 }
 
-func TestPostgresStore_AppendMultiple(t *testing.T) {
+func TestStore_AppendMultiple(t *testing.T) {
 	db := openTestDB(t)
-	store := NewPostgresStore(db)
+	store := NewStore(db)
 	ctx := context.Background()
 
-	store.Append(ctx, "s1", []Event{
+	store.Append(ctx, "s1", []fact.Event{
 		{ID: "e1", Type: "a", Data: json.RawMessage(`{}`)},
 	})
-	store.Append(ctx, "s1", []Event{
+	store.Append(ctx, "s1", []fact.Event{
 		{ID: "e2", Type: "b", Data: json.RawMessage(`{}`)},
 	})
 
@@ -132,12 +139,12 @@ func TestPostgresStore_AppendMultiple(t *testing.T) {
 	}
 }
 
-func TestPostgresStore_LoadFrom(t *testing.T) {
+func TestStore_LoadFrom(t *testing.T) {
 	db := openTestDB(t)
-	store := NewPostgresStore(db)
+	store := NewStore(db)
 	ctx := context.Background()
 
-	store.Append(ctx, "s1", []Event{
+	store.Append(ctx, "s1", []fact.Event{
 		{ID: "e1", Type: "a", Data: json.RawMessage(`{}`)},
 		{ID: "e2", Type: "b", Data: json.RawMessage(`{}`)},
 		{ID: "e3", Type: "c", Data: json.RawMessage(`{}`)},
@@ -159,9 +166,9 @@ func TestPostgresStore_LoadFrom(t *testing.T) {
 	}
 }
 
-func TestPostgresStore_LoadEmpty(t *testing.T) {
+func TestStore_LoadEmpty(t *testing.T) {
 	db := openTestDB(t)
-	store := NewPostgresStore(db)
+	store := NewStore(db)
 	ctx := context.Background()
 
 	loaded, err := store.Load(ctx, "nonexistent")
@@ -173,15 +180,15 @@ func TestPostgresStore_LoadEmpty(t *testing.T) {
 	}
 }
 
-func TestPostgresStore_StreamIsolation(t *testing.T) {
+func TestStore_StreamIsolation(t *testing.T) {
 	db := openTestDB(t)
-	store := NewPostgresStore(db)
+	store := NewStore(db)
 	ctx := context.Background()
 
-	store.Append(ctx, "s1", []Event{
+	store.Append(ctx, "s1", []fact.Event{
 		{ID: "e1", Type: "a", Data: json.RawMessage(`{}`)},
 	})
-	store.Append(ctx, "s2", []Event{
+	store.Append(ctx, "s2", []fact.Event{
 		{ID: "e2", Type: "b", Data: json.RawMessage(`{}`)},
 	})
 
@@ -202,12 +209,12 @@ func TestPostgresStore_StreamIsolation(t *testing.T) {
 	}
 }
 
-func TestPostgresStore_Metadata(t *testing.T) {
+func TestStore_Metadata(t *testing.T) {
 	db := openTestDB(t)
-	store := NewPostgresStore(db)
+	store := NewStore(db)
 	ctx := context.Background()
 
-	store.Append(ctx, "s1", []Event{
+	store.Append(ctx, "s1", []fact.Event{
 		{
 			ID:       "e1",
 			Type:     "a",
@@ -229,18 +236,18 @@ func TestPostgresStore_Metadata(t *testing.T) {
 	}
 }
 
-func TestPostgresStore_LoadAll(t *testing.T) {
+func TestStore_LoadAll(t *testing.T) {
 	db := openTestDB(t)
-	store := NewPostgresStore(db)
+	store := NewStore(db)
 	ctx := context.Background()
 
-	store.Append(ctx, "s1", []Event{
+	store.Append(ctx, "s1", []fact.Event{
 		{ID: "e1", Type: "a", Data: json.RawMessage(`{}`)},
 	})
-	store.Append(ctx, "s2", []Event{
+	store.Append(ctx, "s2", []fact.Event{
 		{ID: "e2", Type: "b", Data: json.RawMessage(`{}`)},
 	})
-	store.Append(ctx, "s1", []Event{
+	store.Append(ctx, "s1", []fact.Event{
 		{ID: "e3", Type: "c", Data: json.RawMessage(`{}`)},
 	})
 
@@ -260,19 +267,18 @@ func TestPostgresStore_LoadAll(t *testing.T) {
 	}
 }
 
-func TestPostgresStore_Replay(t *testing.T) {
+func TestStore_Replay(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	// Write events with a projector
 	var count1 int
-	p1 := &funcProjector{fn: func(_ context.Context, e Event) error {
+	p1 := &funcProjector{fn: func(_ context.Context, e fact.Event) error {
 		count1++
 		return nil
 	}}
-	store1 := NewPostgresStore(db, WithPgProjector(p1))
+	store1 := NewStore(db, WithProjector(p1))
 
-	store1.Append(ctx, "s1", []Event{
+	store1.Append(ctx, "s1", []fact.Event{
 		{ID: "e1", Type: "a", Data: json.RawMessage(`{}`)},
 		{ID: "e2", Type: "b", Data: json.RawMessage(`{}`)},
 	})
@@ -281,13 +287,12 @@ func TestPostgresStore_Replay(t *testing.T) {
 		t.Fatalf("projector handled %d events during append, want 2", count1)
 	}
 
-	// Simulate restart: new projector, replay from DB
 	var count2 int
-	p2 := &funcProjector{fn: func(_ context.Context, e Event) error {
+	p2 := &funcProjector{fn: func(_ context.Context, e fact.Event) error {
 		count2++
 		return nil
 	}}
-	store2 := NewPostgresStore(db, WithPgProjector(p2))
+	store2 := NewStore(db, WithProjector(p2))
 
 	if err := store2.Replay(ctx); err != nil {
 		t.Fatalf("Replay: %v", err)
@@ -298,61 +303,59 @@ func TestPostgresStore_Replay(t *testing.T) {
 	}
 }
 
-func TestPostgresStore_ProjectorError(t *testing.T) {
+func TestStore_ProjectorError(t *testing.T) {
 	db := openTestDB(t)
-	store := NewPostgresStore(db, WithPgProjector(&funcProjector{
-		fn: func(_ context.Context, e Event) error {
+	store := NewStore(db, WithProjector(&funcProjector{
+		fn: func(_ context.Context, e fact.Event) error {
 			return fmt.Errorf("projection failed")
 		},
 	}))
 	ctx := context.Background()
 
-	err := store.Append(ctx, "s1", []Event{
+	err := store.Append(ctx, "s1", []fact.Event{
 		{ID: "e1", Type: "a", Data: json.RawMessage(`{}`)},
 	})
 	if err == nil {
 		t.Fatal("expected error from projector")
 	}
 
-	// Transaction should have been rolled back — no events stored
-	store2 := NewPostgresStore(db)
+	store2 := NewStore(db)
 	loaded, _ := store2.Load(ctx, "s1")
 	if len(loaded) != 0 {
 		t.Errorf("got %d events, want 0 (projector failed, tx rolled back)", len(loaded))
 	}
 }
 
-func TestPostgresStore_AppendEmpty(t *testing.T) {
+func TestStore_AppendEmpty(t *testing.T) {
 	db := openTestDB(t)
-	store := NewPostgresStore(db)
+	store := NewStore(db)
 	ctx := context.Background()
 
 	if err := store.Append(ctx, "s1", nil); err != nil {
 		t.Fatalf("Append nil: %v", err)
 	}
-	if err := store.Append(ctx, "s1", []Event{}); err != nil {
+	if err := store.Append(ctx, "s1", []fact.Event{}); err != nil {
 		t.Fatalf("Append empty: %v", err)
 	}
 }
 
-func TestPostgresStore_NestedAppend(t *testing.T) {
+func TestStore_NestedAppend(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	// A projector that appends to a different stream when it sees "trigger" events
-	var store *PostgresStore
-	reactor := &funcProjector{fn: func(ctx context.Context, e Event) error {
+	var store *Store
+	reactor := &funcProjector{fn: func(ctx context.Context, e fact.Event) error {
 		if e.Type == "trigger" {
-			return store.Append(ctx, "derived", []Event{
+			return store.Append(ctx, "derived", []fact.Event{
 				{ID: e.ID + "-derived", Type: "derived.event", Data: json.RawMessage(`{}`)},
 			})
 		}
 		return nil
 	}}
 
-	store = NewPostgresStore(db, WithPgProjector(reactor))
+	store = NewStore(db, WithProjector(reactor))
 
-	err := store.Append(ctx, "source", []Event{
+	err := store.Append(ctx, "source", []fact.Event{
 		{ID: "e1", Type: "trigger", Data: json.RawMessage(`{}`)},
 	})
 	if err != nil {
@@ -379,40 +382,37 @@ func TestPostgresStore_NestedAppend(t *testing.T) {
 	}
 }
 
-func TestPostgresStore_NestedAppendAtomicity(t *testing.T) {
+func TestStore_NestedAppendAtomicity(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 
-	// Inner projector on derived events that always fails
-	failProjector := &funcProjector{fn: func(ctx context.Context, e Event) error {
+	failProjector := &funcProjector{fn: func(ctx context.Context, e fact.Event) error {
 		if e.Type == "derived.event" {
 			return fmt.Errorf("derived projection failed")
 		}
 		return nil
 	}}
 
-	// Reactor that appends to "derived" stream on trigger events
-	var store *PostgresStore
-	reactor := &funcProjector{fn: func(ctx context.Context, e Event) error {
+	var store *Store
+	reactor := &funcProjector{fn: func(ctx context.Context, e fact.Event) error {
 		if e.Type == "trigger" {
-			return store.Append(ctx, "derived", []Event{
+			return store.Append(ctx, "derived", []fact.Event{
 				{ID: e.ID + "-derived", Type: "derived.event", Data: json.RawMessage(`{}`)},
 			})
 		}
 		return nil
 	}}
 
-	store = NewPostgresStore(db, WithPgProjector(reactor), WithPgProjector(failProjector))
+	store = NewStore(db, WithProjector(reactor), WithProjector(failProjector))
 
-	err := store.Append(ctx, "source", []Event{
+	err := store.Append(ctx, "source", []fact.Event{
 		{ID: "e1", Type: "trigger", Data: json.RawMessage(`{}`)},
 	})
 	if err == nil {
 		t.Fatal("expected error from nested projector")
 	}
 
-	// Both streams should be empty — the whole transaction rolled back
-	store2 := NewPostgresStore(db)
+	store2 := NewStore(db)
 	source, _ := store2.Load(ctx, "source")
 	derived, _ := store2.Load(ctx, "derived")
 
@@ -424,5 +424,5 @@ func TestPostgresStore_NestedAppendAtomicity(t *testing.T) {
 	}
 }
 
-// Verify PostgresStore satisfies the EventStore interface at compile time.
-var _ EventStore = (*PostgresStore)(nil)
+// Verify Store satisfies the fact.EventStore interface at compile time.
+var _ fact.EventStore = (*Store)(nil)

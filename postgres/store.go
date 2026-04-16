@@ -1,4 +1,4 @@
-package fact
+package postgres
 
 import (
 	"context"
@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+
+	fact "github.com/benaskins/axon-fact"
 )
 
 // pgTxKey is a context key for propagating a database transaction
@@ -15,44 +17,44 @@ import (
 // so both appends commit or roll back atomically.
 type pgTxKey struct{}
 
-// PostgresStore implements EventStore backed by PostgreSQL.
+// Store implements fact.EventStore backed by PostgreSQL.
 // The caller is responsible for opening the database and running migrations
 // (using the exported Migrations embed.FS) before constructing the store.
-type PostgresStore struct {
+type Store struct {
 	db             *sql.DB
-	projectors     []Projector
-	publishers     []Publisher
+	projectors     []fact.Projector
+	publishers     []fact.Publisher
 	onPublishError func(error)
 }
 
-// PostgresOption configures a PostgresStore.
-type PostgresOption func(*PostgresStore)
+// Option configures a Store.
+type Option func(*Store)
 
-// WithPgProjector registers a projector that runs synchronously on Append.
-func WithPgProjector(p Projector) PostgresOption {
-	return func(s *PostgresStore) {
+// WithProjector registers a projector that runs synchronously on Append.
+func WithProjector(p fact.Projector) Option {
+	return func(s *Store) {
 		s.projectors = append(s.projectors, p)
 	}
 }
 
-// WithPgPublisher registers a publisher that runs asynchronously after Append.
-func WithPgPublisher(p Publisher) PostgresOption {
-	return func(s *PostgresStore) {
+// WithPublisher registers a publisher that runs asynchronously after Append.
+func WithPublisher(p fact.Publisher) Option {
+	return func(s *Store) {
 		s.publishers = append(s.publishers, p)
 	}
 }
 
-// WithPgPublishErrorHandler registers a callback invoked when a publisher
+// WithPublishErrorHandler registers a callback invoked when a publisher
 // returns an error. The callback runs in the publisher goroutine.
-func WithPgPublishErrorHandler(fn func(error)) PostgresOption {
-	return func(s *PostgresStore) {
+func WithPublishErrorHandler(fn func(error)) Option {
+	return func(s *Store) {
 		s.onPublishError = fn
 	}
 }
 
-// NewPostgresStore wraps an existing database connection as a PostgresStore.
-func NewPostgresStore(db *sql.DB, opts ...PostgresOption) *PostgresStore {
-	s := &PostgresStore{db: db}
+// NewStore wraps an existing database connection as a Store.
+func NewStore(db *sql.DB, opts ...Option) *Store {
+	s := &Store{db: db}
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -63,9 +65,9 @@ func NewPostgresStore(db *sql.DB, opts ...PostgresOption) *PostgresStore {
 // runs projectors synchronously, then publishes asynchronously.
 //
 // If the context already carries a transaction (from an outer Append),
-// the inner Append joins it — both appends commit or roll back as one.
+// the inner Append joins it so both appends commit or roll back as one.
 // This enables projectors to append to other streams atomically.
-func (s *PostgresStore) Append(ctx context.Context, stream string, events []Event) error {
+func (s *Store) Append(ctx context.Context, stream string, events []fact.Event) error {
 	if len(events) == 0 {
 		return nil
 	}
@@ -99,7 +101,7 @@ func (s *PostgresStore) Append(ctx context.Context, stream string, events []Even
 	}
 
 	now := time.Now().UTC()
-	prepared := make([]Event, len(events))
+	prepared := make([]fact.Event, len(events))
 
 	for i, e := range events {
 		e.Stream = stream
@@ -165,7 +167,7 @@ func (s *PostgresStore) Append(ctx context.Context, stream string, events []Even
 }
 
 // Load returns all events for a stream in sequence order.
-func (s *PostgresStore) Load(ctx context.Context, stream string) ([]Event, error) {
+func (s *Store) Load(ctx context.Context, stream string) ([]fact.Event, error) {
 	return s.queryEvents(ctx, `
 		SELECT id, stream, type, data, metadata, sequence, occurred_at
 		FROM events
@@ -175,7 +177,7 @@ func (s *PostgresStore) Load(ctx context.Context, stream string) ([]Event, error
 }
 
 // LoadFrom returns events for a stream with sequence greater than fromSequence.
-func (s *PostgresStore) LoadFrom(ctx context.Context, stream string, fromSequence int64) ([]Event, error) {
+func (s *Store) LoadFrom(ctx context.Context, stream string, fromSequence int64) ([]fact.Event, error) {
 	return s.queryEvents(ctx, `
 		SELECT id, stream, type, data, metadata, sequence, occurred_at
 		FROM events
@@ -186,7 +188,7 @@ func (s *PostgresStore) LoadFrom(ctx context.Context, stream string, fromSequenc
 
 // LoadAll returns all events across all streams, ordered by occurred_at and sequence.
 // Used to rebuild projections on startup.
-func (s *PostgresStore) LoadAll(ctx context.Context) ([]Event, error) {
+func (s *Store) LoadAll(ctx context.Context) ([]fact.Event, error) {
 	return s.queryEvents(ctx, `
 		SELECT id, stream, type, data, metadata, sequence, occurred_at
 		FROM events
@@ -195,7 +197,7 @@ func (s *PostgresStore) LoadAll(ctx context.Context) ([]Event, error) {
 }
 
 // Replay loads all persisted events and replays them through the registered projectors.
-func (s *PostgresStore) Replay(ctx context.Context) error {
+func (s *Store) Replay(ctx context.Context) error {
 	events, err := s.LoadAll(ctx)
 	if err != nil {
 		return fmt.Errorf("load all events: %w", err)
@@ -212,16 +214,16 @@ func (s *PostgresStore) Replay(ctx context.Context) error {
 	return nil
 }
 
-func (s *PostgresStore) queryEvents(ctx context.Context, query string, args ...any) ([]Event, error) {
+func (s *Store) queryEvents(ctx context.Context, query string, args ...any) ([]fact.Event, error) {
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query events: %w", err)
 	}
 	defer rows.Close()
 
-	var events []Event
+	var events []fact.Event
 	for rows.Next() {
-		var e Event
+		var e fact.Event
 		var metadataJSON []byte
 		if err := rows.Scan(&e.ID, &e.Stream, &e.Type, &e.Data, &metadataJSON, &e.Sequence, &e.OccurredAt); err != nil {
 			return nil, fmt.Errorf("scan event: %w", err)

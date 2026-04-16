@@ -1,4 +1,4 @@
-package fact
+package postgres
 
 import "embed"
 
