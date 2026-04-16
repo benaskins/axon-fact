@@ -18,5 +18,5 @@ go vet ./...
 
 - `fact.go` — core Event type and EventStore/Projector/Publisher interfaces
 - `memory.go` — in-memory EventStore implementation
-- `postgres.go` — PostgreSQL-backed EventStore with transactional appends and replay
-- `migrations.go` — embedded SQL migrations for the events table
+- `postgres/store.go` — PostgreSQL-backed EventStore with transactional appends and replay
+- `postgres/migrations.go` — embedded SQL migrations for the events table
