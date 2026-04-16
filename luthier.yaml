@@ -10,8 +10,8 @@ snippet:
     - path: os
     - path: github.com/benaskins/axon-base/migration
     - path: github.com/benaskins/axon-base/pool
-    - path: github.com/benaskins/axon-fact
-      alias: fact
+    - path: github.com/benaskins/axon-fact/postgres
+      alias: factpg
   requires:
     - github.com/benaskins/axon-base
     - github.com/benaskins/axon-fact
@@ -32,11 +32,11 @@ snippet:
       slog.Error("get sql.DB", "error", err)
       os.Exit(1)
     }
-    if err := migration.Run(db, fact.Migrations, "migrations"); err != nil {
+    if err := migration.Run(db, factpg.Migrations, "migrations"); err != nil {
       slog.Error("run migrations", "error", err)
       os.Exit(1)
     }
-    events := fact.NewPostgresStore(db,
+    events := factpg.NewStore(db,
       // TODO: register domain projectors here
     )
     if err := events.Replay(context.Background()); err != nil {
