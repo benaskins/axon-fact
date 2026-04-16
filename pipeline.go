@@ -2,19 +2,11 @@ package fact
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"time"
 )
-
-// newID returns a random hex string suitable for event IDs.
-func newID() string {
-	var b [16]byte
-	_, _ = rand.Read(b[:])
-	return fmt.Sprintf("%x", b)
-}
 
 // Pipeline fans out facts to multiple sinks: an EventStore for append-only
 // persistence, a Materializer for analytical projections, and Publishers
@@ -93,7 +85,7 @@ func (p *Pipeline) Record(ctx context.Context, facts ...Fact) error {
 				return fmt.Errorf("marshal fact %d: %w", i, err)
 			}
 			events[i] = Event{
-				ID:         newID(),
+				ID:         NewEventID(),
 				Type:       f.Schema,
 				Data:       data,
 				OccurredAt: time.Now().UTC(),
